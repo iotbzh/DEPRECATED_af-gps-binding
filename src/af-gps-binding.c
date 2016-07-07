@@ -50,14 +50,33 @@ static int nmea_connect();
 const struct afb_binding_interface *afbitf;
 
 struct gps {
+	unsigned time_is_set: 1;
+	unsigned latitude_is_set: 1;
+	unsigned longitude_is_set: 1;
+	unsigned altitude_is_set: 1;
+	unsigned speed_is_set: 1;
+	unsigned track_is_set: 1;
+
 	uint32_t time;
 	double latitude;
 	double longitude;
-} gps;
+	double altitude;
+	double speed;
+	double track;
+};
+
+static struct gps frames[10];
+static int frameidx;
+static int newframes;
+
+static struct json_object *last_position;
 
 static struct json_object *position()
 {
-	return NULL;
+	if (newframes) {
+		newframes = 0;
+	}
+	return last_position;
 }
 
 static int nmea_time(const char *text, uint32_t *result)
@@ -153,55 +172,76 @@ static int nmea_set(
 		const char *dat
 )
 {
-	uint32_t time;
-	double latitude, longitude, altitude, speed, track;
-	struct gps *gps;
+	struct gps gps;
 
 	DEBUG(afbitf, "time=%s latitude=%s%s longitude=%s%s altitude=%s%s speed=%s track=%s date=%s",
 		tim, lat, latu, lon, lonu, alt, altu, spe, tra, dat);
 
 	/* get the time in milliseconds */
-	if (tim != NULL) {
-		if (!nmea_time(tim, &time))
+	if (tim == NULL)
+		gps.time_is_set = 0;
+	else {
+		if (!nmea_time(tim, &gps.time))
 			return 0;
+		gps.time_is_set = 1;
 	}
 
 	/* get the latitude */
-	if (lat != NULL && latu != NULL) {
+	if (lat == NULL || latu == NULL)
+		gps.latitude_is_set = 0;
+	else {
 		if ((latu[0] != 'N' && latu[0] != 'S') || latu[1] != 0)
 			return 0;
-		if (!nmea_angle(lat, &latitude))
+		if (!nmea_angle(lat, &gps.latitude))
 			return 0;
 		if (latu[0] == 'S')
-			latitude = -latitude;
+			gps.latitude = -gps.latitude;
+		gps.latitude_is_set = 1;
 	}
 
 	/* get the longitude */
-	if (lon != NULL && lonu != NULL) {
+	if (lon == NULL || lonu == NULL)
+		gps.longitude_is_set = 0;
+	else {
 		if ((lonu[0] != 'E' && lonu[0] != 'W') || lonu[1] != 0)
 			return 0;
-		if (!nmea_angle(lon, &longitude))
+		if (!nmea_angle(lon, &gps.longitude))
 			return 0;
 		if (lonu[0] == 'W')
-			longitude = 360.0 - longitude;
+			gps.longitude = 360.0 - gps.longitude;
+		gps.longitude_is_set = 1;
 	}
 
 	/* get the altitude */
-	if (alt != NULL && altu != NULL) {
+	if (alt == NULL || altu == NULL)
+		gps.altitude_is_set = 0;
+	else {
 		if (altu[0] != 'M' || altu[1] != 0)
 			return 0;
-		altitude = atof(alt);
+		gps.altitude = atof(alt);
+		gps.altitude_is_set = 1;
 	}
 
 	/* get the speed */
-	if (spe != NULL) {
-		speed = atof(spe) * KNOT_TO_METER_PER_SECOND;
+	if (spe == NULL)
+		gps.speed_is_set = 0;
+	else {
+		gps.speed = atof(spe) * KNOT_TO_METER_PER_SECOND;
+		gps.speed_is_set = 1;
 	}
 
 	/* get the track */
-	if (tra != NULL) {
-		track = atof(tra);
+	if (tra != NULL)
+		gps.track_is_set = 0;
+	else {
+		gps.track = atof(tra);
+		gps.track_is_set = 1;
 	}
+
+	/* push the frame */
+	frameidx = (frameidx ? : (int)(sizeof frames / sizeof *frames)) - 1; 
+	frames[frameidx] = gps;
+	newframes++;
 
 	return 1;
 }
@@ -340,7 +380,6 @@ static int open_socket_to(const char *host, const char *service)
 {
 	int rc, fd;
 	struct addrinfo hint, *rai, *iai;
-	char xhost[32];
 
 	/* get addr */
 	memset(&hint, 0, sizeof hint);
@@ -353,12 +392,6 @@ static int open_socket_to(const char *host, const char *service)
 	/* get the socket */
 	iai = rai;
 	while (iai != NULL) {
-		struct sockaddr_in *a = (struct sockaddr_in*)(iai->ai_addr);
-		unsigned char *ipv4 = (unsigned char*)&(a->sin_addr.s_addr);
-		unsigned char *port = (unsigned char*)&(a->sin_port);
-		sprintf(xhost, "%d.%d.%d.%d:%d",
-			(int)ipv4[0], (int)ipv4[1], (int)ipv4[2], (int)ipv4[3],
-			(((int)port[0]) << 8)|(int)port[1]);
 		fd = socket(iai->ai_family, iai->ai_socktype, iai->ai_protocol);
 		if (fd >= 0) {
 			rc = connect(fd, iai->ai_addr, iai->ai_addrlen);
@@ -416,7 +449,7 @@ static void get(struct afb_req req)
  */
 static void subscribe(struct afb_req req)
 {
-	afb_req_success(req, position(), NULL);
+	afb_req_success(req, NULL, NULL);
 }
 
 /*
@@ -424,7 +457,7 @@ static void subscribe(struct afb_req req)
  */
 static void unsubscribe(struct afb_req req)
 {
-	afb_req_success(req, position(), NULL);
+	afb_req_success(req, NULL, NULL);
 }
 
 /*
