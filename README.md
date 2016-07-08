@@ -12,8 +12,8 @@ afb-daemon --token=x --ldpaths=. --port=5555 --rootdir=. --verbose --verbose --v
 
 # Environment variables
 
-AFBGPS_HOST    : hostname to connect to
-AFBGPS_SERVICE : service to connect to (tcp port)
-AFBGPS_ISNMEA  : 0/1 - does the frames are NMEA or not") ? 0 : 1;
+* AFBGPS_HOST    : hostname to connect to
+* AFBGPS_SERVICE : service to connect to (tcp port)
+* AFBGPS_ISNMEA  : 0/1 - does the frames are NMEA or not
 
 
