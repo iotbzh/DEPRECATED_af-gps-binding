@@ -41,21 +41,17 @@
  *       http://www.gpsinformation.org/dale/nmea.htm
  */
 
-/* declare the connection routine */
-static int nmea_connect();
-
-/*
- * the interface to afb-daemon
- */
-const struct afb_binding_interface *afbitf;
+struct flags {
+	unsigned time: 1;
+	unsigned latitude: 1;
+	unsigned longitude: 1;
+	unsigned altitude: 1;
+	unsigned speed: 1;
+	unsigned track: 1;
+};
 
 struct gps {
-	unsigned time_is_set: 1;
-	unsigned latitude_is_set: 1;
-	unsigned longitude_is_set: 1;
-	unsigned altitude_is_set: 1;
-	unsigned speed_is_set: 1;
-	unsigned track_is_set: 1;
+	struct flags set;
 
 	uint32_t time;
 	double latitude;
@@ -65,9 +61,22 @@ struct gps {
 	double track;
 };
 
+/* declare the connection routine */
+static int nmea_connect();
+
+/*
+ * the interface to afb-daemon
+ */
+const struct afb_binding_interface *afbitf;
+
 static struct gps frames[10];
 static int frameidx;
 static int newframes;
+
+static const char type_wgs84_name[] = "WGS84";
+static const char type_dms_kmh_name[] = "DMS.km/H";
+static const char type_dms_Mh_name[] = "DMS.M/H";
+static const char type_dms_Knh_name[] = "DMS.Kn/H";
 
 static struct json_object *last_position;
 
@@ -176,16 +185,16 @@ static int nmea_set(
 
 	/* get the time in milliseconds */
 	if (tim == NULL)
-		gps.time_is_set = 0;
+		gps.set.time = 0;
 	else {
 		if (!nmea_time(tim, &gps.time))
 			return 0;
-		gps.time_is_set = 1;
+		gps.set.time = 1;
 	}
 
 	/* get the latitude */
 	if (lat == NULL || latu == NULL)
-		gps.latitude_is_set = 0;
+		gps.set.latitude = 0;
 	else {
 		if ((latu[0] != 'N' && latu[0] != 'S') || latu[1] != 0)
 			return 0;
@@ -193,12 +202,12 @@ static int nmea_set(
 			return 0;
 		if (latu[0] == 'S')
 			gps.latitude = -gps.latitude;
-		gps.latitude_is_set = 1;
+		gps.set.latitude = 1;
 	}
 
 	/* get the longitude */
 	if (lon == NULL || lonu == NULL)
-		gps.longitude_is_set = 0;
+		gps.set.longitude = 0;
 	else {
 		if ((lonu[0] != 'E' && lonu[0] != 'W') || lonu[1] != 0)
 			return 0;
@@ -206,33 +215,33 @@ static int nmea_set(
 			return 0;
 		if (lonu[0] == 'W')
 			gps.longitude = 360.0 - gps.longitude;
-		gps.longitude_is_set = 1;
+		gps.set.longitude = 1;
 	}
 
 	/* get the altitude */
 	if (alt == NULL || altu == NULL)
-		gps.altitude_is_set = 0;
+		gps.set.altitude = 0;
 	else {
 		if (altu[0] != 'M' || altu[1] != 0)
 			return 0;
 		gps.altitude = atof(alt);
-		gps.altitude_is_set = 1;
+		gps.set.altitude = 1;
 	}
 
 	/* get the speed */
 	if (spe == NULL)
-		gps.speed_is_set = 0;
+		gps.set.speed = 0;
 	else {
 		gps.speed = atof(spe) * KNOT_TO_METER_PER_SECOND;
-		gps.speed_is_set = 1;
+		gps.set.speed = 1;
 	}
 
 	/* get the track */
 	if (tra != NULL)
-		gps.track_is_set = 0;
+		gps.set.track = 0;
 	else {
 		gps.track = atof(tra);
-		gps.track_is_set = 1;
+		gps.set.track = 1;
 	}
 
 	/* push the frame */
