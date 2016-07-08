@@ -40,6 +40,8 @@
 #define METER_PER_SECOND_TO_KILOMETER_PER_HOUR     3.6                  /* 3600 / 1000 */
 #define METER_PER_SECOND_TO_MILE_PER_HOUR          2.236936292          /* 3600 / 1609.344 */
 
+#define DEFAULT_PERIOD   2000   /* 2 seconds */
+
 /*
  * references:
  *
@@ -47,6 +49,7 @@
  *       http://www.gpsinformation.org/dale/nmea.htm
  */
 
+/* flags for recording what field is set */
 struct flags {
 	unsigned time: 1;
 	unsigned latitude: 1;
@@ -56,6 +59,7 @@ struct flags {
 	unsigned track: 1;
 };
 
+/* the gps data converted */
 struct gps {
 	struct flags set;
 
@@ -67,36 +71,47 @@ struct gps {
 	double track;
 };
 
+/*
+ * the type of position expected
+ *
+ * here, this type is mainly the selection of units
+ */
 enum type {
-	type_wgs84,
-	type_dms_kmh,
-	type_dms_mph,
-	type_dms_kn,
+	type_wgs84,	/* longitude, latitude, track: degre, altitude: m, speed: m/s */
+	type_dms_kmh,	/* longitude, latitude: degre°minute'second.xxx"X, track: degre, altitude: m, speed: km/h */
+	type_dms_mph,	/* longitude, latitude: degre°minute'second.xxx"X, track: degre, altitude: m, speed: mph  */
+	type_dms_kn,	/* longitude, latitude: degre°minute'second.xxx"X, track: degre, altitude: m, speed: kn   */
 	type_COUNT,
 	type_DEFAULT = type_wgs84,
 	type_INVALID = -1
 };
 
 struct event;
-struct period;
 
+/*
+ * for each expected period
+ */
 struct period {
-	struct period *next;
-	struct event *events;
-	uint32_t period;
-	uint32_t last;
+	struct period *next;	/* link to the next other period */
+	struct event *events;	/* events for the period */
+	uint32_t period;	/* value of the period in ms */
+	uint32_t last;		/* last update of the period */
 };
 
+/*
+ * each generated event
+ */
 struct event {
-	struct event *next;
-	struct event *byid;
-	struct period *period;
-	const char *name;
-	struct afb_event event;
-	enum type type;
-	int id;
+	struct event *next;	/* link for the same period */
+	const char *name;	/* name of the event */
+	struct afb_event event;	/* the event for the binder */
+	enum type type;		/* the type of data expected */
+	int id;			/* id of the event for unsubscribe */
 };
 
+/*
+ * names of the types
+ */
 static const char * const type_NAMES[type_COUNT] = {
 	"WGS84",
 	"DMS.km/h",
@@ -109,30 +124,45 @@ static const char * const type_NAMES[type_COUNT] = {
  */
 const struct afb_binding_interface *afbitf;
 
-static struct gps frames[10];
-static int frameidx;
-static int newframes;
+/*
+ * records the raw frames
+ */
+static struct gps frames[10];	/* a short memory for further computation if needed */
+static int frameidx;		/* index of the last frame (frames are in the reverse order) */
+static int newframes;		/* boolean indication of wether new frames are availables */
 
-static struct json_object *time_ms;
-static struct json_object *latitude_wgs;
-static struct json_object *longitude_wgs;
-static struct json_object *latitude_dms;
-static struct json_object *longitude_dms;
-static struct json_object *altitude_m;
-static struct json_object *speed_ms;
-static struct json_object *speed_kmh;
-static struct json_object *speed_mph;
-static struct json_object *speed_kn;
-static struct json_object *track_d;
+/*
+ * records the JSON object for sending positions
+ */
+static struct json_object *time_ms;		/* time as double in millisecond */
+static struct json_object *latitude_wgs;	/* latitude as double in degree */
+static struct json_object *longitude_wgs;	/* longitude as double in degree */
+static struct json_object *latitude_dms;	/* latitude as string in d°m's.s"X */
+static struct json_object *longitude_dms;	/* longitude as string in d°m's.s"X */
+static struct json_object *altitude_m;		/* altitude as double in meter */
+static struct json_object *speed_ms;		/* speed as double in m/s */
+static struct json_object *speed_kmh;		/* speed as double in km/h */
+static struct json_object *speed_mph;		/* speed as double in mph */
+static struct json_object *speed_kn;		/* speed as double in kn */
+static struct json_object *track_d;		/* heading track as double in degree */
 
-static struct json_object *positions[type_COUNT];
+static struct json_object *positions[type_COUNT];	/* computed positions by type */
 
-static struct period *periods;
-static struct event *events;
+/* head of the list of periods */
+static struct period *list_of_periods;
 
 /* declare the connection routine */
 static int nmea_connect();
 
+/***************************************************************************************/
+/***************************************************************************************/
+/**                                                                                   **/
+/**                                                                                   **/
+/**       SECTION: FORMATING JSON POSITIONS                                           **/
+/**                                                                                   **/
+/**                                                                                   **/
+/***************************************************************************************/
+/***************************************************************************************/
 /*
  * Creates the JSON representation for Degree Minute Second representation of coordinates
  */
@@ -288,15 +318,34 @@ static struct json_object *position(enum type type)
 	return json_object_get(result);
 }
 
+/***************************************************************************************/
+/***************************************************************************************/
+/**                                                                                   **/
+/**                                                                                   **/
+/**       SECTION: MANAGING EVENTS                                                    **/
+/**                                                                                   **/
+/**                                                                                   **/
+/***************************************************************************************/
+/***************************************************************************************/
 /*
  * get the event handler of given id
  */
 static struct event *event_of_id(int id)
 {
-	struct event *r = events;
-	while(r && r->id != id)
-		r = r->byid;
-	return r;
+	struct period *p;
+	struct event *e;
+
+	p = list_of_periods;
+	while(p != NULL) {
+		e = p->events;
+		p = p->next;
+		while(e != NULL) {
+			if (e->id == id)
+				return e;
+			e = e->next;
+		}
+	}
+	return NULL;
 }
 
 /*
@@ -305,20 +354,20 @@ static struct event *event_of_id(int id)
 static struct event *event_get(enum type type, int period)
 {
 	static int id;
-	int mask;
+	int shift;
 	uint32_t perio;
 	struct period *p, **pp, *np;
 	struct event *e;
 
 	/* normalize the period */
 	period = period <= 100 ? 1 : period > 60000 ? 600 : (period / 100);
-	mask = 31;
-	while(period > (period & mask))
-		mask <<= 1;
-	perio = (uint32_t)(100 * (period & mask));
+	shift = 0;
+	while((period >> shift) > 31)
+		shift++;
+	perio = (uint32_t)(100 * (((period >> shift) & 31) << shift));
 
 	/* search for the period */
-	pp = &periods;
+	pp = &list_of_periods;
 	p = *pp;
 	while(p != NULL && p->period < perio) {
 		pp = &p->next;
@@ -355,8 +404,6 @@ static struct event *event_get(enum type type, int period)
 		}
 
 		e->next = p->events;
-		e->byid = events;
-		e->period = p;
 		e->type = type;
 		do {
 			id++;
@@ -365,16 +412,18 @@ static struct event *event_get(enum type type, int period)
 		} while(event_of_id(id) != NULL);
 		e->id = id;
 		p->events = e;
-		events = e;
 	}
 
 	return e;
 }
 
+/*
+ * Sends the events if needed
+ */
 static void event_send()
 {
 	struct period *p, **pp;
-	struct event *e, **pe, **peid;
+	struct event *e, **pe;
 	struct timeval tv;
 	uint32_t now;
 
@@ -387,7 +436,7 @@ static void event_send()
 	now = (uint32_t)(tv.tv_sec * 1000) + (uint32_t)(tv.tv_usec / 1000);
 
 	/* iterates over the periods */
-	pp = &periods;
+	pp = &list_of_periods;
 	p = *pp;
 	while (p != NULL) {
 		if (p->events == NULL) {
@@ -407,10 +456,6 @@ static void event_send()
 					else {
 						/* no more listeners, free the event */
 						*pe = e->next;
-						peid = &events;
-						while (*peid != e)
-							peid = &(*peid)->byid;
-						*peid = e->byid;
 						afb_event_drop(e->event);
 						free(e);
 					}
@@ -423,6 +468,18 @@ static void event_send()
 	}
 }
 
+/***************************************************************************************/
+/***************************************************************************************/
+/**                                                                                   **/
+/**                                                                                   **/
+/**       SECTION: HANDLING NMEA SENTENCES                                            **/
+/**                                                                                   **/
+/**                                                                                   **/
+/***************************************************************************************/
+/***************************************************************************************/
+/*
+ * interprets a nmea time
+ */
 static int nmea_time(const char *text, uint32_t *result)
 {
 	uint32_t x;
@@ -466,6 +523,9 @@ static int nmea_time(const char *text, uint32_t *result)
 	return 1;
 }
 
+/*
+ * interprets a nmea angle having minutes
+ */
 static int nmea_angle(const char *text, double *result)
 {
 	uint32_t x = 0;
@@ -503,6 +563,10 @@ static int nmea_angle(const char *text, double *result)
 	return 1;
 }
 
+/*
+ * creates a new position for the given optionnal fields
+ * returns 1 if correct or 0 if a format error exists
+ */
 static int nmea_set(
 		const char *tim,
 		const char *lat, const char *latu,
@@ -596,6 +660,9 @@ static int nmea_set(
 	return 1;
 }
 
+/*
+ * Splits the nmea sentences in its fields
+ */
 static int nmea_split(char *s, char *fields[], int count)
 {
 	int index = 0;
@@ -789,6 +856,15 @@ static int nmea_connect()
 	return rc;
 }
 
+/***************************************************************************************/
+/***************************************************************************************/
+/**                                                                                   **/
+/**                                                                                   **/
+/**       SECTION: BINDING VERBS IMPLEMENTATION                                       **/
+/**                                                                                   **/
+/**                                                                                   **/
+/***************************************************************************************/
+/***************************************************************************************/
 /*
  * Returns the type corresponding to the given name
  */
@@ -836,7 +912,7 @@ static void subscribe(struct afb_req req)
 
 	if (get_type_for_req(req, &type)) {
 		period = afb_req_value(req, "period");
-		event = event_get(type, period == NULL ? 2000 : atoi(period));
+		event = event_get(type, period == NULL ? DEFAULT_PERIOD : atoi(period));
 		if (event == NULL)
 			afb_req_fail(req, "out-of-memory", NULL);
 		else if (afb_req_subscribe(req, event->event) != 0)
