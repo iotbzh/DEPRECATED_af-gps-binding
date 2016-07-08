@@ -919,6 +919,26 @@ static int get_type_for_req(struct afb_req req, enum type *type)
 	
 /*
  * Get the last known position
+ *
+ * parameter of the get are:
+ *
+ *    type:   string: the type of position expected (defaults to "WGS84" if not present)
+ *
+ * returns the position
+ *
+ * The valid types are:
+ *
+ *  +==========+=======================+=======+==========+=======+
+ *  | type     |  longitude & latitude | speed | altitude | track |
+ *  +==========+=======================+=======+==========+=======+
+ *  | WGS84    |      degre            |  m/s  |          |       |
+ *  +----------+-----------------------+-------+          |       |
+ *  | DMS.km/h |                       | km/h  |          |       |
+ *  +----------+                       +-------+   meter  | degre |
+ *  | DMS.mph  |   deg°min'sec"X       |  mph  |          |       |
+ *  +----------+                       +-------+          |       |
+ *  | DMS.kn   |                       |  kn   |          |       |
+ *  +==========+=======================+=======+==========+=======+
  */
 static void get(struct afb_req req)
 {
@@ -929,6 +949,17 @@ static void get(struct afb_req req)
 
 /*
  * subscribe to notification of position
+ *
+ * parameters of the subscription are:
+ *
+ *    type:   string:  the type of position expected (defaults to WCS84 if not present)
+ *                     see the list above (get)
+ *    period: integer: the expected period in milliseconds (defaults to 2000 if not present)
+ *
+ * returns an object with 2 fields:
+ *
+ *    name:   string:  the name of the event without its prefix
+ *    id:     integer: a numeric identifier of the event to be used for unsubscribing
  */
 static void subscribe(struct afb_req req)
 {
@@ -955,6 +986,10 @@ static void subscribe(struct afb_req req)
 
 /*
  * unsubscribe a previous subscription
+ *
+ * parameters of the unsubscription are:
+ *
+ *    id:   integer: the numeric identifier of the event as returned when subscribing
  */
 static void unsubscribe(struct afb_req req)
 {
