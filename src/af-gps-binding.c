@@ -857,6 +857,8 @@ static int connect_to(const char *host, const char *service, int isgpsd)
 	if (rc < 0) {
 		close(fd);
 		ERROR(afbitf, "can't coonect host %s, service %s to the event loop", host, service);
+	} else {
+		NOTICE(afbitf, "Connected to host %s, service %s", host, service);
 	}
 	return rc;
 }
