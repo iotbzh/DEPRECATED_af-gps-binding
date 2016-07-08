@@ -1,1 +1,1 @@
-{ global: afbBindingV1Register; local: *; };
+{ global: afbBindingV1*; local: *; };

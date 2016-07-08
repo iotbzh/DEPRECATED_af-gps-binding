@@ -32,6 +32,7 @@
 #include <systemd/sd-event.h>
 
 #include <afb/afb-binding.h>
+#include <afb/afb-service-itf.h>
 
 #define NAUTICAL_MILE_IN_METER                     1852
 #define MILE_IN_METER                              1609.344
@@ -1041,10 +1042,10 @@ static const struct afb_binding binding_description =
 const struct afb_binding *afbBindingV1Register(const struct afb_binding_interface *itf)
 {
 	afbitf = itf;			/* records the interface for accessing afb-daemon */
-
-	connection();
-
 	return &binding_description;	/* returns the description of the binding */
 }
 
-
+int afbBindingV1ServiceInit(struct afb_service service)
+{
+	return connection();
+}
