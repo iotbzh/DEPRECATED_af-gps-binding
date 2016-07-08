@@ -125,6 +125,7 @@ static int nmea_time(const char *text, uint32_t *result)
 static int nmea_angle(const char *text, double *result)
 {
 	uint32_t x = 0;
+	double v;
 	int dotidx = (int)(strchrnul(text, '.') - text);
 
 	switch(dotidx) {
@@ -141,23 +142,19 @@ static int nmea_angle(const char *text, double *result)
 			return 0;
 		x = x * 10 + (uint32_t)(text[dotidx - 3] - '0');
 	case 2:
-		if (text[dotidx - 2] < '0' || text[dotidx - 2] > '9')
-			return 0;
-		x = x * 6 + (uint32_t)(text[dotidx - 3] - '0');
+		v = atof(&text[dotidx - 2]);
+		break;
 	case 1:
 		if (text[dotidx - 1] < '0' || text[dotidx - 1] > '9')
 			return 0;
-		x = x * 10 + (uint32_t)(text[dotidx - 3] - '0');
 	case 0:
+		v = atof(text);
 		break;
 	default:
 		return 0;
 	}
 
-	if (text[dotidx] == '.')
-		*result = atof(&text[dotidx]) + x;
-	else
-		*result = x;
+	*result = (double)x + v * 0.01666666666666666666666;
 
 	return 1;
 }
