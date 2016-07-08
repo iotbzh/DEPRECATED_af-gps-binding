@@ -851,6 +851,10 @@ static int connect_to(const char *host, const char *service, int isgpsd)
 		ERROR(afbitf, "can't connect to host %s, service %s", host, service);
 		return fd;
 	}
+	if (isgpsd) {
+		static const char gpsdsetup[] = "?WATCH={\"enable\":true,\"nmea\":true};\r\n";
+		write(fd, gpsdsetup, sizeof gpsdsetup - 1);
+	}
 
 	/* adds to the event loop */
 	rc = sd_event_add_io(afb_daemon_get_event_loop(afbitf->daemon), &source, fd, EPOLLIN, on_event, NULL);
