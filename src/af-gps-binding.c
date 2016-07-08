@@ -20,10 +20,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <math.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #include <json-c/json.h>
 
@@ -31,8 +33,12 @@
 
 #include <afb/afb-binding.h>
 
-#define NAUTICAL_MILE_IN_METER     1852
-#define KNOT_TO_METER_PER_SECOND   0.5144444444444444
+#define NAUTICAL_MILE_IN_METER                     1852
+#define MILE_IN_METER                              1609.344
+#define KNOT_TO_METER_PER_SECOND                   0.5144444444         /* 1852 / 3600 */
+#define METER_PER_SECOND_TO_KNOT                   1.943844492          /* 3600 / 1852 */
+#define METER_PER_SECOND_TO_KILOMETER_PER_HOUR     3.6                  /* 3600 / 1000 */
+#define METER_PER_SECOND_TO_MILE_PER_HOUR          2.236936292          /* 3600 / 1609.344 */
 
 /*
  * references:
@@ -61,8 +67,42 @@ struct gps {
 	double track;
 };
 
-/* declare the connection routine */
-static int nmea_connect();
+enum type {
+	type_wgs84,
+	type_dms_kmh,
+	type_dms_mph,
+	type_dms_kn,
+	type_COUNT,
+	type_DEFAULT = type_wgs84,
+	type_INVALID = -1
+};
+
+struct event;
+struct period;
+
+struct period {
+	struct period *next;
+	struct event *events;
+	uint32_t period;
+	uint32_t last;
+};
+
+struct event {
+	struct event *next;
+	struct event *byid;
+	struct period *period;
+	const char *name;
+	struct afb_event event;
+	enum type type;
+	int id;
+};
+
+static const char * const type_NAMES[type_COUNT] = {
+	"WGS84",
+	"DMS.km/h",
+	"DMS.mph",
+	"DMS.kn"
+};
 
 /*
  * the interface to afb-daemon
@@ -73,19 +113,314 @@ static struct gps frames[10];
 static int frameidx;
 static int newframes;
 
-static const char type_wgs84_name[] = "WGS84";
-static const char type_dms_kmh_name[] = "DMS.km/H";
-static const char type_dms_Mh_name[] = "DMS.M/H";
-static const char type_dms_Knh_name[] = "DMS.Kn/H";
+static struct json_object *time_ms;
+static struct json_object *latitude_wgs;
+static struct json_object *longitude_wgs;
+static struct json_object *latitude_dms;
+static struct json_object *longitude_dms;
+static struct json_object *altitude_m;
+static struct json_object *speed_ms;
+static struct json_object *speed_kmh;
+static struct json_object *speed_mph;
+static struct json_object *speed_kn;
+static struct json_object *track_d;
 
-static struct json_object *last_position;
+static struct json_object *positions[type_COUNT];
 
-static struct json_object *position()
+static struct period *periods;
+static struct event *events;
+
+/* declare the connection routine */
+static int nmea_connect();
+
+/*
+ * Creates the JSON representation for Degree Minute Second representation of coordinates
+ */
+static struct json_object *new_dms(double a, int islat)
 {
+	char buffer[50], pos;
+	double D, M;
+
+	if (islat) {
+		if (a >= 0)
+			pos = 'N';
+		else {
+			a = -a;
+			pos = 'S';
+		}
+	} else {
+		if (a <= 180)
+			pos = 'E';
+		else {
+			a = 360 - a;
+			pos = 'W';
+		}
+	}
+	D = floor(a);
+	a = (a - D) * 60;
+	M = floor(a);
+	a = (a - M) * 60;
+	sprintf(buffer, "%d°%d'%.3f\"%c", (int)D, (int)M, a, pos);
+	return json_object_new_string(buffer);
+}
+
+/*
+ * adds the value (with reference count increment) if not null
+ */
+static void addif(struct json_object *obj, const char *name, struct json_object *val)
+{
+	if (val != NULL)
+		json_object_object_add(obj, name, json_object_get(val));
+}
+
+/*
+ * release the object (put) and reset the pointer to null
+ */
+static void clear(struct json_object **obj)
+{
+	json_object_put(*obj);
+	*obj = NULL;
+}
+
+/*
+ * get the last/current position of type
+ */
+static struct json_object *position(enum type type)
+{
+	struct json_object *result;
+	struct gps *g0;
+
+	/* clean on new frame */
 	if (newframes) {
+		clear(&time_ms);
+		clear(&latitude_wgs);
+		clear(&longitude_wgs);
+		clear(&latitude_dms);
+		clear(&longitude_dms);
+		clear(&altitude_m);
+		clear(&speed_ms);
+		clear(&speed_kmh);
+		clear(&speed_mph);
+		clear(&speed_kn);
+		clear(&track_d);
+		clear(&positions[type_wgs84]);
+		clear(&positions[type_dms_kmh]);
+		clear(&positions[type_dms_mph]);
+		clear(&positions[type_dms_kn]);
 		newframes = 0;
 	}
-	return last_position;
+
+	/* get the result */
+	result = positions[type];
+	if (result == NULL) {
+		DEBUG(afbitf, "building position for type %s", type_NAMES[type]);
+
+		/* should build the result */
+		g0 = &frames[frameidx];
+		result = json_object_new_object();
+		if (result == NULL)
+			return NULL;
+		positions[type] = result;
+
+		/* set the result type */
+		json_object_object_add(result, "type", json_object_new_string(type_NAMES[type]));
+
+		/* build time, altitude and track */
+		if (time_ms == NULL && g0->set.time)
+			time_ms = json_object_new_double (g0->time);
+		addif(result, "time", time_ms);
+		if (altitude_m == NULL && g0->set.altitude)
+			altitude_m = json_object_new_double (g0->altitude);
+		addif(result, "altitude", altitude_m);
+		if (track_d == NULL && g0->set.track)
+			track_d = json_object_new_double (g0->track);
+		addif(result, "track", track_d);
+
+		/* build position */
+		switch (type) {
+		default:
+		case type_wgs84:
+			if (latitude_wgs == NULL && g0->set.latitude)
+				latitude_wgs = json_object_new_double (g0->latitude);
+			addif(result, "latitude", latitude_wgs);
+			if (longitude_wgs == NULL && g0->set.longitude)
+				longitude_wgs = json_object_new_double (g0->longitude);
+			addif(result, "longitude", longitude_wgs);
+			break;
+		case type_dms_kmh:
+		case type_dms_mph:
+		case type_dms_kn:
+			if (latitude_dms == NULL && g0->set.latitude)
+				latitude_dms = new_dms (g0->latitude, 1);
+			addif(result, "latitude", latitude_dms);
+			if (longitude_dms == NULL && g0->set.longitude)
+				longitude_dms = new_dms (g0->longitude, 0);
+			addif(result, "longitude", longitude_dms);
+			break;
+		}
+
+		/* build speed */
+		switch (type) {
+		default:
+		case type_wgs84:
+			if (speed_ms == NULL && g0->set.speed)
+				speed_ms = json_object_new_double (g0->speed);
+			addif(result, "speed", speed_ms);
+			break;
+		case type_dms_kmh:
+			if (speed_kmh == NULL && g0->set.speed)
+				speed_kmh = json_object_new_double (g0->speed * METER_PER_SECOND_TO_KILOMETER_PER_HOUR);
+			addif(result, "speed", speed_kmh);
+			break;
+		case type_dms_mph:
+			if (speed_mph == NULL && g0->set.speed)
+				speed_mph = json_object_new_double (g0->speed * METER_PER_SECOND_TO_MILE_PER_HOUR);
+			addif(result, "speed", speed_mph);
+			break;
+		case type_dms_kn:
+			if (speed_kn == NULL && g0->set.speed)
+				speed_kn = json_object_new_double (g0->speed * METER_PER_SECOND_TO_KNOT);
+			addif(result, "speed", speed_kn);
+			break;
+		}
+	}
+
+	return json_object_get(result);
+}
+
+/*
+ * get the event handler of given id
+ */
+static struct event *event_of_id(int id)
+{
+	struct event *r = events;
+	while(r && r->id != id)
+		r = r->byid;
+	return r;
+}
+
+/*
+ * get the event handler for the type and the period
+ */
+static struct event *event_get(enum type type, int period)
+{
+	static int id;
+	int mask;
+	uint32_t perio;
+	struct period *p, **pp, *np;
+	struct event *e;
+
+	/* normalize the period */
+	period = period <= 100 ? 1 : period > 60000 ? 600 : (period / 100);
+	mask = 31;
+	while(period > (period & mask))
+		mask <<= 1;
+	perio = (uint32_t)(100 * (period & mask));
+
+	/* search for the period */
+	pp = &periods;
+	p = *pp;
+	while(p != NULL && p->period < perio) {
+		pp = &p->next;
+		p = *pp;
+	}
+
+	/* create the period if it misses */
+	if (p == NULL || p->period != perio) {
+		np = calloc(1, sizeof *p);
+		if (np == NULL)
+			return NULL;
+		np->next = p;
+		np->period = perio;
+		*pp = np;
+		p = np;
+	}
+
+	/* search the type */
+	e = p->events;
+	while(e != NULL && e->type != type)
+		e = e->next;
+
+	/* creates the type if needed */
+	if (e == NULL) {
+		e = calloc(1, sizeof *e);
+		if (e == NULL)
+			return NULL;
+
+		e->name = "GPS"; /* TODO */
+		e->event = afb_daemon_make_event(afbitf->daemon, e->name);
+		if (e->event.itf == NULL) {
+			free(e);
+			return NULL;
+		}
+
+		e->next = p->events;
+		e->byid = events;
+		e->period = p;
+		e->type = type;
+		do {
+			id++;
+			if (id < 0)
+				id = 1;
+		} while(event_of_id(id) != NULL);
+		e->id = id;
+		p->events = e;
+		events = e;
+	}
+
+	return e;
+}
+
+static void event_send()
+{
+	struct period *p, **pp;
+	struct event *e, **pe, **peid;
+	struct timeval tv;
+	uint32_t now;
+
+	/* skip if nothing is new */
+	if (!newframes)
+		return;
+
+	/* computes now */
+	gettimeofday(&tv, NULL);
+	now = (uint32_t)(tv.tv_sec * 1000) + (uint32_t)(tv.tv_usec / 1000);
+
+	/* iterates over the periods */
+	pp = &periods;
+	p = *pp;
+	while (p != NULL) {
+		if (p->events == NULL) {
+			/* no event for the period, frees it */
+			*pp = p->next;
+			free(p);
+		} else {
+			if (p->period <= now - p->last) {
+				/* its time to refresh */
+				p->last = now;
+				pe = &p->events;
+				e = *pe;
+				while (e != NULL) {
+					/* sends the event */
+					if (afb_event_push(e->event, position(e->type)) != 0)
+						pe = &e->next;
+					else {
+						/* no more listeners, free the event */
+						*pe = e->next;
+						peid = &events;
+						while (*peid != e)
+							peid = &(*peid)->byid;
+						*peid = e->byid;
+						afb_event_drop(e->event);
+						free(e);
+					}
+					e = *pe;
+				}
+			}
+			pp = &p->next;
+		}
+		p = *pp;
+	}
 }
 
 static int nmea_time(const char *text, uint32_t *result)
@@ -163,7 +498,7 @@ static int nmea_angle(const char *text, double *result)
 		return 0;
 	}
 
-	*result = (double)x + v * 0.01666666666666666666666;
+	*result = (double)x + v * 0.01666666666666666666666; /* 1 / 60 */
 
 	return 1;
 }
@@ -248,6 +583,15 @@ static int nmea_set(
 	frameidx = (frameidx ? : (int)(sizeof frames / sizeof *frames)) - 1; 
 	frames[frameidx] = gps;
 	newframes++;
+
+	DEBUG(afbitf, "time:%d=%d latitude:%d=%g longitude:%d=%g altitude:%d=%g speed:%d=%g track:%d=%g",
+		(int)gps.set.time, gps.set.time ? (int)gps.time : 0,
+		(int)gps.set.latitude, gps.set.latitude ? gps.latitude : 0,
+		(int)gps.set.longitude, gps.set.longitude ? gps.longitude : 0,
+		(int)gps.set.altitude, gps.set.altitude ? gps.altitude : 0,
+		(int)gps.set.speed, gps.set.speed ? gps.speed : 0,
+		(int)gps.set.track, gps.set.track ? gps.track : 0
+	);
 
 	return 1;
 }
@@ -367,8 +711,10 @@ static int nmea_read(int fd)
 static int nmea_on_event(sd_event_source *s, int fd, uint32_t revents, void *userdata)
 {
 	/* read available data */
-	if ((revents & EPOLLIN) != 0)
+	if ((revents & EPOLLIN) != 0) {
 		nmea_read(fd);
+		event_send();
+	}
 
 	/* check if error or hangup */
 	if ((revents & (EPOLLERR|EPOLLRDHUP|EPOLLHUP)) != 0) {
@@ -376,6 +722,7 @@ static int nmea_on_event(sd_event_source *s, int fd, uint32_t revents, void *use
 		close(fd);
 		nmea_connect(fd);
 	}
+
 	return 0;
 }
 
@@ -443,11 +790,38 @@ static int nmea_connect()
 }
 
 /*
+ * Returns the type corresponding to the given name
+ */
+static enum type type_of_name(const char *name)
+{
+	enum type result;
+	if (name == NULL)
+		return type_DEFAULT;
+	for (result = 0 ; result != type_COUNT ; result++)
+		if (strcmp(type_NAMES[result], name) == 0)
+			return result;
+	return type_INVALID;
+}
+
+/*
+ * extract a valid type from the request
+ */
+static int get_type_for_req(struct afb_req req, enum type *type)
+{
+	if ((*type = type_of_name(afb_req_value(req, "type"))) != type_INVALID)
+		return 1;
+	afb_req_fail(req, "unknown-type", NULL);
+	return 0;
+}
+	
+/*
  * Get the last known position
  */
 static void get(struct afb_req req)
 {
-	afb_req_success(req, position(), NULL);
+	enum type type;
+	if (get_type_for_req(req, &type))
+		afb_req_success(req, position(type), NULL);
 }
 
 /*
@@ -455,7 +829,25 @@ static void get(struct afb_req req)
  */
 static void subscribe(struct afb_req req)
 {
-	afb_req_success(req, NULL, NULL);
+	enum type type;
+	const char *period;
+	struct event *event;
+	struct json_object *json;
+
+	if (get_type_for_req(req, &type)) {
+		period = afb_req_value(req, "period");
+		event = event_get(type, period == NULL ? 2000 : atoi(period));
+		if (event == NULL)
+			afb_req_fail(req, "out-of-memory", NULL);
+		else if (afb_req_subscribe(req, event->event) != 0)
+			afb_req_fail_f(req, "failed", "afb_req_subscribe returned an error: %m");
+		else {
+			json = json_object_new_object();
+			json_object_object_add(json, "name", json_object_new_string(event->name));
+			json_object_object_add(json, "id", json_object_new_int(event->id));
+			afb_req_success(req, json, NULL);
+		}
+	}
 }
 
 /*
@@ -463,7 +855,21 @@ static void subscribe(struct afb_req req)
  */
 static void unsubscribe(struct afb_req req)
 {
-	afb_req_success(req, NULL, NULL);
+	const char *id;
+	struct event *event;
+
+	id = afb_req_value(req, "id");
+	if (id == NULL)
+		afb_req_fail(req, "missing-id", NULL);
+	else {
+		event = event_of_id(atoi(id));
+		if (event == NULL)
+			afb_req_fail(req, "bad-id", NULL);
+		else {
+			afb_req_unsubscribe(req, event->event);
+			afb_req_success(req, NULL, NULL);
+		}
+	}
 }
 
 /*
