@@ -151,9 +151,6 @@ static struct json_object *positions[type_COUNT];	/* computed positions by type 
 /* head of the list of periods */
 static struct period *list_of_periods;
 
-/* declare the connection routine */
-static int nmea_connect();
-
 /***************************************************************************************/
 /***************************************************************************************/
 /**                                                                                   **/
@@ -472,7 +469,7 @@ static void event_send()
 /***************************************************************************************/
 /**                                                                                   **/
 /**                                                                                   **/
-/**       SECTION: HANDLING NMEA SENTENCES                                            **/
+/**       SECTION: HANDLING NMEA                                                      **/
 /**                                                                                   **/
 /**                                                                                   **/
 /***************************************************************************************/
@@ -772,10 +769,22 @@ static int nmea_read(int fd)
 	}
 }
 
+/***************************************************************************************/
+/***************************************************************************************/
+/**                                                                                   **/
+/**                                                                                   **/
+/**       SECTION: HANDLING OF CONNECTION                                             **/
+/**                                                                                   **/
+/**                                                                                   **/
+/***************************************************************************************/
+/***************************************************************************************/
+/* declare the connection routine */
+static int connection();
+
 /*
  * called on an event on the NMEA stream
  */
-static int nmea_on_event(sd_event_source *s, int fd, uint32_t revents, void *userdata)
+static int on_event(sd_event_source *s, int fd, uint32_t revents, void *userdata)
 {
 	/* read available data */
 	if ((revents & EPOLLIN) != 0) {
@@ -787,7 +796,7 @@ static int nmea_on_event(sd_event_source *s, int fd, uint32_t revents, void *use
 	if ((revents & (EPOLLERR|EPOLLRDHUP|EPOLLHUP)) != 0) {
 		sd_event_source_unref(s);
 		close(fd);
-		nmea_connect(fd);
+		connection(fd);
 	}
 
 	return 0;
@@ -829,18 +838,14 @@ static int open_socket_to(const char *host, const char *service)
 }
 
 /*
- * connection to nmea stream
+ * connection to nmea stream for the host and the port
  */
-static int nmea_connect()
+static int connect_to(const char *host, const char *service, int isgpsd)
 {
 	sd_event_source *source;
 	int rc, fd;
-	const char *host;
-	const char *service;
 
 	/* TODO connect to somewhere else */
-	host = "sinagot.net";
-	service = "5001";
 	fd = open_socket_to(host, service);
 	if (fd < 0) {
 		ERROR(afbitf, "can't connect to host %s, service %s", host, service);
@@ -848,12 +853,28 @@ static int nmea_connect()
 	}
 
 	/* adds to the event loop */
-	rc = sd_event_add_io(afb_daemon_get_event_loop(afbitf->daemon), &source, fd, EPOLLIN, nmea_on_event, NULL);
+	rc = sd_event_add_io(afb_daemon_get_event_loop(afbitf->daemon), &source, fd, EPOLLIN, on_event, NULL);
 	if (rc < 0) {
 		close(fd);
 		ERROR(afbitf, "can't coonect host %s, service %s to the event loop", host, service);
 	}
 	return rc;
+}
+
+/*
+ * connection to nmea stream
+ */
+static int connection()
+{
+	const char *host;
+	const char *service;
+	int isgpsd;
+
+	/* TODO connect to somewhere else */
+	host = getenv("AFBGPS_HOST") ? : "sinagot.net";
+	service = getenv("AFBGPS_SERVICE") ? : "5001";
+	isgpsd = getenv("AFBGPS_ISNMEA") ? 0 : 1;
+	return connect_to(host, service, isgpsd);
 }
 
 /***************************************************************************************/
@@ -980,7 +1001,7 @@ const struct afb_binding *afbBindingV1Register(const struct afb_binding_interfac
 {
 	afbitf = itf;			/* records the interface for accessing afb-daemon */
 
-	nmea_connect();
+	connection();
 
 	return &binding_description;	/* returns the description of the binding */
 }

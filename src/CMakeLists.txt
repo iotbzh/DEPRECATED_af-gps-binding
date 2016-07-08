@@ -16,7 +16,7 @@
 # limitations under the License.
 ###########################################################################
 
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.3)
 
 ###########################################################################
 
@@ -50,11 +50,11 @@ link_libraries(${EXTRAS_LIBRARIES})
 message(STATUS "Creation af-gps-binding for AFB-DAEMON")
 
 ###############################################################
-pkg_get_variable(afb_binding_install_dir afb-daemon binding_install_dir)
-#execute_process(
-#	COMMAND pkg-config --variable binding_install_dir afb-daemon
-#	OUTPUT_VARIABLE afb_binding_install_dir OUTPUT_STRIP_TRAILING_WHITESPACE
-#)
+#pkg_get_variable(afb_binding_install_dir afb-daemon binding_install_dir)
+execute_process(
+	COMMAND pkg-config --variable binding_install_dir afb-daemon
+	OUTPUT_VARIABLE afb_binding_install_dir OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
 ###############################################################
 add_library(af-gps-binding MODULE af-gps-binding.c)
